@@ -1,0 +1,3 @@
+# Installed on the GPU instance by scripts/serve.sh.
+# Left loosely pinned: vLLM follows the CUDA driver on the JarvisLabs image.
+vllm>=0.6.0

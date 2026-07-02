@@ -1,0 +1,64 @@
+# VM path. JarvisLabs template instances cannot run Docker; create a VM instead.
+# From the repo root, on the VM: bash scripts/vm-up.sh
+
+services:
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile.vllm
+    image: llm-deployment-vllm
+    ipc: host
+    shm_size: "16gb"
+    environment:
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}
+      VLLM_DTYPE: ${VLLM_DTYPE:-bfloat16}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:-8192}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.90}
+      TENSOR_PARALLEL_SIZE: ${TENSOR_PARALLEL_SIZE:-1}
+      TRUST_REMOTE_CODE: ${TRUST_REMOTE_CODE:-}
+      VLLM_EXTRA_ARGS: ${VLLM_EXTRA_ARGS:-}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - huggingface:/root/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 40
+      start_period: 900s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: llm-deployment-ui
+    depends_on:
+      vllm:
+        condition: service_healthy
+    environment:
+      VLLM_BASE_URL: http://vllm:8000/v1
+      MODEL_ID: ${MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}
+      APP_TITLE: ${APP_TITLE:-LLM Chat}
+      VLLM_API_KEY: ${VLLM_API_KEY:-not-needed}
+    ports:
+      - "${UI_PORT:-6006}:6006"
+    restart: unless-stopped
+
+volumes:
+  huggingface:

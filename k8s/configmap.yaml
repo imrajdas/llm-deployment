@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+  namespace: llm
+data:
+  MODEL_ID: "Qwen/Qwen2.5-7B-Instruct"
+  APP_TITLE: "LLM Chat"
+  VLLM_DTYPE: "bfloat16"
+  MAX_MODEL_LEN: "8192"
+  GPU_MEMORY_UTILIZATION: "0.9"
+  TENSOR_PARALLEL_SIZE: "1"
+  TRUST_REMOTE_CODE: ""
+  VLLM_EXTRA_ARGS: ""
+  UI_PORT: "6006"

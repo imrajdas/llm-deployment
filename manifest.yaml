@@ -1,0 +1,54 @@
+# Deployment manifest for vLLM + Streamlit.
+# Kubernetes path (Azure control plane + JarvisLabs GPU worker): docs/K8S.md
+# Single JarvisLabs machine, without Kubernetes: bash scripts/launch.sh
+#
+# GPU availability and prices: https://jarvislabs.ai/  and  `jl gpus`
+# Regions: L4, A100, and A100-80GB are in IN2. H100 and H200 are in EU1.
+
+name: llm-chat
+title: LLM Chat
+
+# Hugging Face model id. vLLM downloads it on first boot.
+# Qwen2.5-7B-Instruct is open and fits an A100 40GB at bf16.
+model: Qwen/Qwen2.5-7B-Instruct
+
+jarvislabs:
+  # Run `jl gpus` before launch and pick a type that has free devices.
+  gpu: A100
+  num_gpus: 1
+  # Weights, the vLLM install, and the Hugging Face cache all live on this disk.
+  storage_gb: 100
+  # pytorch = container with Jupyter, SSH, and public port 6006.
+  # Containers cannot run Docker. Use template: vm for docker/docker-compose.yml.
+  template: pytorch
+  # Empty uses JarvisLabs auto-routing (IN2, then EU1).
+  region: ""
+  # Optional. Fill in after: bash scripts/register-startup.sh
+  # That script restarts the app when you Resume from the dashboard.
+  startup_script_id: ""
+
+ports:
+  # JarvisLabs maps container port 6006 to the instance API endpoint.
+  ui: 6006
+  # vLLM stays on localhost unless you change vllm.host and expose the port.
+  vllm: 8000
+
+vllm:
+  host: 127.0.0.1
+  dtype: bfloat16
+  # Lower this (try 4096) if the process dies during GPU memory profiling.
+  max_model_len: 8192
+  gpu_memory_utilization: 0.90
+  # Env var read from .env. Empty means no --api-key (localhost only).
+  api_key_env: VLLM_API_KEY
+  trust_remote_code: false
+  # Extra tokens appended to `vllm serve`, for example:
+  #   - --quantization
+  #   - awq
+  extra_args: []
+
+streamlit:
+  host: 0.0.0.0
+
+# Env var read from .env for gated Hugging Face models.
+hf_token_env: HF_TOKEN

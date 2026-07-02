@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: huggingface
+  namespace: llm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 80Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: llm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      # A Service named vllm would set VLLM_PORT to a tcp:// URL, which vLLM rejects.
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      nodeSelector:
+        gpu.jarvislabs.ai/node: "true"
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -eu
+              if [ -n "${HF_TOKEN:-}" ]; then
+                export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
+              fi
+              set -- serve "$MODEL_ID" \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --dtype "$VLLM_DTYPE" \
+                --max-model-len "$MAX_MODEL_LEN" \
+                --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+                --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
+              if [ "${TRUST_REMOTE_CODE:-}" = "1" ]; then
+                set -- "$@" --trust-remote-code
+              fi
+              if [ -n "${VLLM_API_KEY:-}" ]; then
+                set -- "$@" --api-key "$VLLM_API_KEY"
+              fi
+              if [ -n "${VLLM_EXTRA_ARGS:-}" ]; then
+                # shellcheck disable=SC2086
+                set -- "$@" $VLLM_EXTRA_ARGS
+              fi
+              exec vllm "$@"
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: llm-config
+          env:
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+                  optional: true
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+                  optional: true
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: VLLM_API_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: "1" # manifest.num_gpus
+            limits:
+              memory: 32Gi
+              nvidia.com/gpu: "1" # manifest.num_gpus
+          volumeMounts:
+            - name: cache
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 180
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 6
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: huggingface
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: llm
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

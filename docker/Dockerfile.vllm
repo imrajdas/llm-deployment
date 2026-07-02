@@ -1,0 +1,6 @@
+FROM vllm/vllm-openai:latest
+
+COPY vllm-entrypoint.sh /vllm-entrypoint.sh
+RUN chmod +x /vllm-entrypoint.sh
+
+ENTRYPOINT ["/vllm-entrypoint.sh"]

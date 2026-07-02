@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streamlit
+  namespace: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: streamlit
+  template:
+    metadata:
+      labels:
+        app: streamlit
+    spec:
+      # The chat UI does not need a GPU. Prefer the Azure control-plane node.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+      containers:
+        - name: streamlit
+          image: llm-deployment-ui:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 6006
+          env:
+            - name: VLLM_BASE_URL
+              value: http://vllm.llm.svc.cluster.local:8000/v1
+            - name: MODEL_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-config
+                  key: MODEL_ID
+            - name: APP_TITLE
+              valueFrom:
+                configMapKeyRef:
+                  name: llm-config
+                  key: APP_TITLE
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: VLLM_API_KEY
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: streamlit
+  namespace: llm
+spec:
+  type: NodePort
+  selector:
+    app: streamlit
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30066

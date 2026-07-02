@@ -1,0 +1,11 @@
+.git
+.venv
+venv
+logs
+.cache
+.env
+docker/.env
+.deploy-state
+**/__pycache__
+**/*.pyc
+.DS_Store
