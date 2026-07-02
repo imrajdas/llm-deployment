@@ -4,6 +4,10 @@ Chat with an open model. vLLM runs on a JarvisLabs GPU VM. The Streamlit page ru
 
 Model, GPU, and context length are in [`manifest.yaml`](manifest.yaml).
 
+## How it fits together
+
+![Laptop, Azure control plane, and JarvisLabs GPU node](docs/architecture.png)
+
 ## Start and stop
 
 The GPU bills while it is running. Resume it when you want to chat, and pause it when you stop.
