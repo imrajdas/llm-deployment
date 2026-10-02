@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Bootstrap a single-node kubeadm control plane on the Azure VM.
-# Run this on the Azure VM after Tailscale is logged in:
+# WireGuard (README default):
+#   sudo env CLUSTER_NODE_IP=10.200.0.1 CLUSTER_IFACE=wg0 \
+#     bash k8s/scripts/bootstrap-control-plane.sh
+# Tailscale:
 #   sudo tailscale up
 #   sudo bash k8s/scripts/bootstrap-control-plane.sh
+# NetBird:
+#   sudo env CLUSTER_MESH=netbird NETBIRD_SETUP_KEY=... \
+#     bash k8s/scripts/bootstrap-control-plane.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,19 +23,20 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
   exit 0
 fi
 
-TS_IP="$(cluster_node_ip)"
+ensure_cluster_mesh k8s-cp
+NODE_IP="$(cluster_node_ip)"
 CLUSTER_IFACE="$(cluster_iface)"
-echo "Using ${TS_IP} on ${CLUSTER_IFACE} as the Kubernetes API address."
+echo "Using ${NODE_IP} on ${CLUSTER_IFACE} ($(cluster_mesh)) as the Kubernetes API address."
 
 hostnamectl set-hostname k8s-cp
 prepare_os
 install_containerd
 install_kubeadm
-write_kubelet_args "$TS_IP"
+write_kubelet_args "$NODE_IP"
 
 kubeadm init \
-  --apiserver-advertise-address="$TS_IP" \
-  --control-plane-endpoint="$TS_IP:6443" \
+  --apiserver-advertise-address="$NODE_IP" \
+  --control-plane-endpoint="$NODE_IP:6443" \
   --pod-network-cidr=10.244.0.0/16 \
   --node-name=k8s-cp \
   --cri-socket=unix:///var/run/containerd/containerd.sock
@@ -65,17 +72,18 @@ fi
 kubectl -n "$FLANNEL_NS" patch ds kube-flannel-ds --type=json \
   -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--iface=${CLUSTER_IFACE}\"}]"
 
-python3 - "$FLANNEL_NS" <<'PY'
+FLANNEL_MTU="$(cluster_flannel_mtu)"
+python3 - "$FLANNEL_NS" "$FLANNEL_MTU" <<'PY'
 import json, subprocess, sys
-ns = sys.argv[1]
+ns, mtu = sys.argv[1], int(sys.argv[2])
 raw = subprocess.check_output([
     "kubectl", "-n", ns, "get", "cm", "kube-flannel-cfg",
     "-o", "jsonpath={.data.net-conf\\.json}",
 ])
 net = json.loads(raw)
 backend = net.setdefault("Backend", {"Type": "vxlan"})
-# Tailscale MTU is 1280. VXLAN needs about 50 bytes of headroom.
-backend["MTU"] = 1230
+# Tailscale and NetBird tunnels are 1280. VXLAN needs about 50 bytes.
+backend["MTU"] = mtu
 patch = json.dumps({"data": {"net-conf.json": json.dumps(net)}})
 subprocess.run([
     "kubectl", "-n", ns, "patch", "cm", "kube-flannel-cfg",
@@ -112,8 +120,18 @@ fi
 
 kubectl wait --for=condition=Ready "node/k8s-cp" --timeout=180s
 echo
-echo "Control plane is Ready at https://${TS_IP}:6443"
-echo "From the laptop, export AZURE_SSH to a user that can SSH to this Tailscale address."
-echo "Example: export AZURE_SSH=${SUDO_USER:-azureuser}@${TS_IP}"
+echo "Control plane is Ready at https://${NODE_IP}:6443"
+case "$(cluster_mesh)" in
+  netbird)
+    echo "From the laptop, export AZURE_SSH to a user that can SSH to this NetBird address."
+    ;;
+  tailscale)
+    echo "From the laptop, export AZURE_SSH to a user that can SSH to this Tailscale address."
+    ;;
+  *)
+    echo "From the laptop, export AZURE_SSH to a user that can SSH to this VM."
+    ;;
+esac
+echo "Example: export AZURE_SSH=${SUDO_USER:-azureuser}@${NODE_IP}"
 echo
 kubeadm token create --print-join-command

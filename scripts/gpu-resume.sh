@@ -22,4 +22,4 @@ if [[ "${LAUNCH_YES:-}" == "1" ]]; then
 fi
 "${args[@]}"
 echo "Resumed ${MID}. On the Azure VM: sudo kubectl get nodes"
-echo "jarvis-gpu should become Ready after Tailscale and kubelet reconnect."
+echo "jarvis-gpu should become Ready after the mesh client (WireGuard, Tailscale, or NetBird) and kubelet reconnect."

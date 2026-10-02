@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # Create a JarvisLabs GPU VM and join it to the kubeadm cluster on Azure.
+# The GPU node has to use the same mesh as the control plane.
 #
+# Tailscale:
 #   export TAILSCALE_AUTHKEY=tskey-auth-...
+#   export AZURE_SSH=azureuser@100.x.y.z
+#   bash scripts/add-gpu-node.sh
+#
+# NetBird:
+#   export CLUSTER_MESH=netbird
+#   export NETBIRD_SETUP_KEY=...
 #   export AZURE_SSH=azureuser@100.x.y.z
 #   bash scripts/add-gpu-node.sh
 set -euo pipefail
@@ -14,12 +22,39 @@ require_python_yaml
 require_jl
 load_manifest
 
-if [[ -z "${TAILSCALE_AUTHKEY:-}" ]]; then
-  echo "Export TAILSCALE_AUTHKEY from the Tailscale admin console (reusable, preauthorized)." >&2
-  exit 1
+if [[ -z "${CLUSTER_MESH:-}" ]]; then
+  if [[ -n "${NETBIRD_SETUP_KEY:-}" && -n "${TAILSCALE_AUTHKEY:-}" ]]; then
+    echo "Both NETBIRD_SETUP_KEY and TAILSCALE_AUTHKEY are set. Export CLUSTER_MESH=netbird or CLUSTER_MESH=tailscale." >&2
+    exit 1
+  fi
+  if [[ -n "${NETBIRD_SETUP_KEY:-}" ]]; then
+    CLUSTER_MESH=netbird
+  else
+    CLUSTER_MESH=tailscale
+  fi
 fi
+case "$CLUSTER_MESH" in
+  netbird)
+    if [[ -z "${NETBIRD_SETUP_KEY:-}" ]]; then
+      echo "Export NETBIRD_SETUP_KEY from the NetBird dashboard (a reusable setup key)." >&2
+      exit 1
+    fi
+    ;;
+  tailscale)
+    if [[ -z "${TAILSCALE_AUTHKEY:-}" ]]; then
+      echo "Export TAILSCALE_AUTHKEY from the Tailscale admin console (reusable, preauthorized)." >&2
+      echo "To use NetBird instead: export CLUSTER_MESH=netbird NETBIRD_SETUP_KEY=..." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "scripts/add-gpu-node.sh supports CLUSTER_MESH=tailscale or CLUSTER_MESH=netbird." >&2
+    echo "WireGuard uses the manual steps in the README." >&2
+    exit 1
+    ;;
+esac
 if [[ -z "${AZURE_SSH:-}" ]]; then
-  echo "Export AZURE_SSH, for example azureuser@<tailscale-ip-of-the-azure-vm>." >&2
+  echo "Export AZURE_SSH, for example azureuser@<mesh-ip-of-the-azure-vm>." >&2
   exit 1
 fi
 if [[ -f "$ROOT/.k8s-gpu-state" ]]; then
@@ -81,8 +116,16 @@ sync_code "$MID"
 join_file="$(mktemp)"
 chmod 600 "$join_file"
 {
-  printf 'TAILSCALE_AUTHKEY=%q\n' "$TAILSCALE_AUTHKEY"
+  printf 'CLUSTER_MESH=%q\n' "$CLUSTER_MESH"
   printf 'JOIN_COMMAND=%q\n' "$JOIN"
+  if [[ "$CLUSTER_MESH" == "netbird" ]]; then
+    printf 'NETBIRD_SETUP_KEY=%q\n' "$NETBIRD_SETUP_KEY"
+    if [[ -n "${NETBIRD_MANAGEMENT_URL:-}" ]]; then
+      printf 'NETBIRD_MANAGEMENT_URL=%q\n' "$NETBIRD_MANAGEMENT_URL"
+    fi
+  else
+    printf 'TAILSCALE_AUTHKEY=%q\n' "$TAILSCALE_AUTHKEY"
+  fi
 } >"$join_file"
 jl upload "$MID" "$join_file" /home/llm-deployment/join.env
 rm -f "$join_file"

@@ -58,22 +58,88 @@ install_kubeadm() {
   systemctl enable kubelet
 }
 
+# CLUSTER_MESH selects the network kubeadm advertises:
+#   wireguard  README default. Set CLUSTER_NODE_IP and CLUSTER_IFACE=wg0.
+#   tailscale  tailscale0. Used when Tailscale is logged in and no mesh is set.
+#   netbird    wt0. Set CLUSTER_MESH=netbird, or export NETBIRD_SETUP_KEY.
+cluster_mesh() {
+  if [[ -n "${CLUSTER_MESH:-}" ]]; then
+    case "$CLUSTER_MESH" in
+      wireguard|tailscale|netbird)
+        printf '%s\n' "$CLUSTER_MESH"
+        ;;
+      *)
+        echo "CLUSTER_MESH must be wireguard, tailscale, or netbird." >&2
+        return 1
+        ;;
+    esac
+    return 0
+  fi
+  if [[ -n "${NETBIRD_SETUP_KEY:-}" ]]; then
+    printf '%s\n' netbird
+    return 0
+  fi
+  if [[ -n "${CLUSTER_NODE_IP:-}" ]]; then
+    printf '%s\n' wireguard
+    return 0
+  fi
+  if command -v tailscale >/dev/null 2>&1; then
+    local ts_ip
+    ts_ip="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$ts_ip" ]]; then
+      printf '%s\n' tailscale
+      return 0
+    fi
+  fi
+  if mesh_ipv4 wt0 >/dev/null 2>&1; then
+    printf '%s\n' netbird
+    return 0
+  fi
+  printf '%s\n' tailscale
+}
+
+mesh_ipv4() {
+  local iface="$1" ip
+  ip="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)"
+  if [[ -z "$ip" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$ip"
+}
+
 cluster_node_ip() {
   if [[ -n "${CLUSTER_NODE_IP:-}" ]]; then
     printf '%s\n' "$CLUSTER_NODE_IP"
     return 0
   fi
-  if ! command -v tailscale >/dev/null 2>&1; then
-    echo "Set CLUSTER_NODE_IP, or install Tailscale and run: sudo tailscale up" >&2
-    return 1
-  fi
-  local ip
-  ip="$(tailscale ip -4 | head -n 1)"
-  if [[ -z "$ip" ]]; then
-    echo "Tailscale has no IPv4 address yet. Finish login with: sudo tailscale up" >&2
-    return 1
-  fi
-  printf '%s\n' "$ip"
+  local mesh ip
+  mesh="$(cluster_mesh)" || return 1
+  case "$mesh" in
+    netbird)
+      if ! ip="$(mesh_ipv4 wt0)"; then
+        echo "NetBird has no IPv4 address on wt0. Run: sudo netbird up" >&2
+        echo "Or export NETBIRD_SETUP_KEY and re-run with CLUSTER_MESH=netbird." >&2
+        return 1
+      fi
+      printf '%s\n' "$ip"
+      ;;
+    wireguard)
+      echo "Set CLUSTER_NODE_IP to this node's WireGuard address." >&2
+      return 1
+      ;;
+    tailscale)
+      if ! command -v tailscale >/dev/null 2>&1; then
+        echo "Set CLUSTER_NODE_IP for WireGuard, install Tailscale and run sudo tailscale up, or set CLUSTER_MESH=netbird." >&2
+        return 1
+      fi
+      ip="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
+      if [[ -z "$ip" ]]; then
+        echo "Tailscale has no IPv4 address yet. Finish login with: sudo tailscale up" >&2
+        return 1
+      fi
+      printf '%s\n' "$ip"
+      ;;
+  esac
 }
 
 cluster_iface() {
@@ -81,11 +147,94 @@ cluster_iface() {
     printf '%s\n' "$CLUSTER_IFACE"
     return 0
   fi
-  if [[ -n "${CLUSTER_NODE_IP:-}" ]]; then
-    printf '%s\n' wg0
+  local mesh
+  mesh="$(cluster_mesh)" || return 1
+  case "$mesh" in
+    netbird) printf '%s\n' wt0 ;;
+    wireguard) printf '%s\n' wg0 ;;
+    tailscale) printf '%s\n' tailscale0 ;;
+  esac
+}
+
+# Flannel VXLAN needs about 50 bytes under the tunnel MTU.
+# Tailscale and NetBird use 1280, so 1230 still fits a plain WireGuard iface too.
+cluster_flannel_mtu() {
+  if [[ -n "${CLUSTER_FLANNEL_MTU:-}" ]]; then
+    printf '%s\n' "$CLUSTER_FLANNEL_MTU"
     return 0
   fi
-  printf '%s\n' tailscale0
+  printf '%s\n' 1230
+}
+
+ensure_tailscale() {
+  local hostname="${1:-}"
+  if ! command -v tailscale >/dev/null 2>&1; then
+    if [[ -z "${TAILSCALE_AUTHKEY:-}" ]]; then
+      return 0
+    fi
+    curl -fsSL https://tailscale.com/install.sh | sh
+  fi
+  if [[ -z "${TAILSCALE_AUTHKEY:-}" ]]; then
+    return 0
+  fi
+  local args=(up --authkey="$TAILSCALE_AUTHKEY" --accept-dns=false)
+  if [[ -n "$hostname" ]]; then
+    args+=(--hostname="$hostname")
+  fi
+  tailscale "${args[@]}"
+}
+
+ensure_netbird() {
+  local hostname="${1:-}"
+  if mesh_ipv4 wt0 >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -z "${NETBIRD_SETUP_KEY:-}" ]]; then
+    echo "NetBird has no IPv4 address on wt0." >&2
+    echo "Install and connect, or pass a reusable setup key:" >&2
+    echo "  curl -fsSL https://pkgs.netbird.io/install.sh | sh" >&2
+    echo "  sudo netbird up --hostname ${hostname:-k8s-cp}" >&2
+    echo "  export NETBIRD_SETUP_KEY=... CLUSTER_MESH=netbird" >&2
+    return 1
+  fi
+  if ! command -v netbird >/dev/null 2>&1; then
+    curl -fsSL https://pkgs.netbird.io/install.sh | sh
+  fi
+  local key_file args
+  key_file="$(mktemp)"
+  chmod 600 "$key_file"
+  printf '%s\n' "$NETBIRD_SETUP_KEY" >"$key_file"
+  args=(up --setup-key-file "$key_file" --interface-name wt0 --mtu 1280 --disable-dns)
+  if [[ -n "$hostname" ]]; then
+    args+=(--hostname "$hostname")
+  fi
+  if [[ -n "${NETBIRD_MANAGEMENT_URL:-}" ]]; then
+    args+=(--management-url "$NETBIRD_MANAGEMENT_URL")
+  fi
+  if ! netbird "${args[@]}"; then
+    rm -f "$key_file"
+    return 1
+  fi
+  rm -f "$key_file"
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if mesh_ipv4 wt0 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "NetBird did not get an IPv4 address on wt0." >&2
+  netbird status || true
+  return 1
+}
+
+ensure_cluster_mesh() {
+  local hostname="${1:-}" mesh
+  mesh="$(cluster_mesh)" || return 1
+  case "$mesh" in
+    netbird) ensure_netbird "$hostname" ;;
+    tailscale) ensure_tailscale "$hostname" ;;
+    wireguard) ;;
+  esac
 }
 
 write_kubelet_args() {

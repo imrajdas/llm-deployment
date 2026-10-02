@@ -21,18 +21,6 @@ if [[ -f "$JOIN_ENV" ]]; then
   trap 'rm -f "$JOIN_ENV"' EXIT
 fi
 
-install_tailscale() {
-  if [[ -n "${CLUSTER_NODE_IP:-}" ]]; then
-    return 0
-  fi
-  if ! command -v tailscale >/dev/null 2>&1; then
-    curl -fsSL https://tailscale.com/install.sh | sh
-  fi
-  if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
-    tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname=jarvis-gpu --accept-dns=false
-  fi
-}
-
 install_nvidia_runtime() {
   if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then
     echo "nvidia-smi failed. JarvisLabs GPU VMs should already have the driver." >&2
@@ -53,9 +41,9 @@ install_nvidia_runtime() {
   systemctl restart containerd
 }
 
-install_tailscale
-TS_IP="$(cluster_node_ip)"
-echo "GPU node cluster address ${TS_IP}"
+ensure_cluster_mesh jarvis-gpu
+NODE_IP="$(cluster_node_ip)"
+echo "GPU node cluster address ${NODE_IP} on $(cluster_iface) ($(cluster_mesh))"
 
 if [[ -f /etc/kubernetes/kubelet.conf ]]; then
   echo "This VM is already joined to a cluster."
@@ -70,10 +58,10 @@ prepare_os
 install_containerd
 install_nvidia_runtime
 install_kubeadm
-write_kubelet_args "$TS_IP" "--node-labels=gpu.jarvislabs.ai/node=true"
+write_kubelet_args "$NODE_IP" "--node-labels=gpu.jarvislabs.ai/node=true"
 
 # shellcheck disable=SC2086
 bash -lc "$JOIN_COMMAND --node-name=jarvis-gpu --cri-socket=unix:///var/run/containerd/containerd.sock"
 rm -f "$JOIN_ENV"
-echo "Joined the cluster as jarvis-gpu (${TS_IP})."
+echo "Joined the cluster as jarvis-gpu (${NODE_IP})."
 nvidia-smi -L || true

@@ -24,6 +24,8 @@ bash scripts/gpu-pause.sh
 
 Pause stops compute billing and keeps the disk, so the model stays downloaded. `jarvis-gpu` shows NotReady until you resume. The Azure VM stays up, and the page loads again after resume.
 
+`jl resume` can print a new machine id. Write that id into `.k8s-gpu-state`. On the GPU VM, set the hostname back to `jarvis-gpu` if it came up as `jl-vm-<id>`, then restart kubelet. With WireGuard, also point Azure's peer at the GPU VM's new public IP. Those steps are in [docs/K8S.md](docs/K8S.md).
+
 Delete the GPU VM and its disk:
 
 ```bash
@@ -43,7 +45,9 @@ kubectl -n llm get pods
 kubectl -n llm logs -f deploy/vllm
 ```
 
-`scripts/k8s-access.sh` reads `.k8s-cp-state` and opens an SSH tunnel to the API. Run it again if `kubectl` cannot connect.
+`scripts/k8s-access.sh` reads `.k8s-cp-state` and opens an SSH tunnel to the API on `127.0.0.1:16443`. If `kubectl` says that connection was refused, run `bash scripts/k8s-access.sh` again.
+
+`kubectl get nodes -o wide` shows the address the cluster is using in `INTERNAL-IP`. `10.200.0.1` and `10.200.0.2` are WireGuard. A NetBird or Tailscale address is the one on `wt0` or `tailscale0`. The cluster address is kubelet's `--node-ip`. On each VM, `grep node-ip /etc/default/kubelet` prints it. `sudo netbird status` reports the NetBird tunnel on its own.
 
 ## Change the model
 
@@ -105,6 +109,8 @@ sudo systemctl enable --now wg-quick@wg0
 ```
 
 From the GPU VM, `ping -c 3 10.200.0.1` should succeed. Delete `/tmp/wg.key` after the config is in place.
+
+WireGuard is the default. Tailscale and NetBird are optional. Use one mesh for both VMs, and choose it before `kubeadm init`. Tailscale and NetBird setup, including the GPU node, is in [docs/K8S.md](docs/K8S.md).
 
 ### 2. Control plane
 
@@ -177,7 +183,7 @@ bash scripts/k8s-apply.sh
 
 For a gated model, copy `.env.example` to `.env` and set `HF_TOKEN` before that command. Allow TCP `30066` from your IP, then open `http://<azure-public-ip>:30066`. The first start downloads the model onto the GPU node's disk.
 
-More detail, including the Tailscale helper `scripts/add-gpu-node.sh`, is in [docs/K8S.md](docs/K8S.md). To run vLLM and Streamlit on a single JarvisLabs machine, use [docs/GUIDE.md](docs/GUIDE.md).
+More detail is in [docs/K8S.md](docs/K8S.md), including Tailscale and NetBird. `scripts/add-gpu-node.sh` joins the GPU VM over whichever of those two the control plane already uses. To run vLLM and Streamlit on a single JarvisLabs machine, use [docs/GUIDE.md](docs/GUIDE.md).
 
 ## License
 
