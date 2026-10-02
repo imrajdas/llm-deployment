@@ -65,11 +65,119 @@ kubectl -n llm port-forward svc/vllm 8000:8000
 VLLM_BASE_URL=http://127.0.0.1:8000/v1 python examples/chat.py "Hello"
 ```
 
-## Set up the cluster
+## Set up from scratch
 
-One Azure VM is the control plane. One JarvisLabs GPU VM joins it. The full setup is [docs/K8S.md](docs/K8S.md).
+You need an Azure Ubuntu VM (2 vCPUs, 8 GB RAM, a public IP, SSH as `azureuser`) and a JarvisLabs account. On the laptop:
 
-To run vLLM and Streamlit on a single JarvisLabs machine, without Kubernetes, use [docs/GUIDE.md](docs/GUIDE.md).
+```bash
+pip install -r requirements-operator.txt
+jl setup
+jl ssh-key add ~/.ssh/id_ed25519.pub --name laptop
+```
+
+`jl gpus` shows which GPUs are free. Set `jarvislabs.gpu` in `manifest.yaml`. The GPU machine must be a VM (`jl create --vm`) with at least 100 GB of disk. A JarvisLabs template container cannot run kubelet.
+
+### 1. WireGuard
+
+Kubernetes uses a private network, because the Azure public IP is a NAT address and is not on the VM's NIC.
+
+Install WireGuard on both VMs (`sudo apt-get install -y wireguard`). Azure is `10.200.0.1`. The GPU VM is `10.200.0.2`. Both listen on UDP `51820`. In the Azure network security group, allow that UDP port from the GPU VM's public IP.
+
+On each VM, `wg genkey | tee /tmp/wg.key | wg pubkey` prints the public key. Azure's `/etc/wireguard/wg0.conf`:
+
+```ini
+[Interface]
+Address = 10.200.0.1/24
+ListenPort = 51820
+PrivateKey = <azure-private-key>
+
+[Peer]
+PublicKey = <gpu-public-key>
+AllowedIPs = 10.200.0.2/32
+Endpoint = <gpu-public-ip>:51820
+PersistentKeepalive = 25
+```
+
+On the GPU VM, swap the addresses: `10.200.0.2/24`, the Azure public key, `AllowedIPs = 10.200.0.1/32`, and `Endpoint = <azure-public-ip>:51820`.
+
+```bash
+sudo systemctl enable --now wg-quick@wg0
+```
+
+From the GPU VM, `ping -c 3 10.200.0.1` should succeed. Delete `/tmp/wg.key` after the config is in place.
+
+### 2. Control plane
+
+Copy this repo to the Azure VM and run:
+
+```bash
+sudo env CLUSTER_NODE_IP=10.200.0.1 CLUSTER_IFACE=wg0 \
+  bash k8s/scripts/bootstrap-control-plane.sh
+```
+
+The script installs containerd and Kubernetes 1.37, runs `kubeadm init`, and installs Flannel, a local-path volume provisioner, and the NVIDIA device plugin. The plugin stays pending until the GPU node exists. Keep the `kubeadm join` command it prints.
+
+On the laptop, create `.k8s-cp-state` (this file is gitignored):
+
+```
+AZURE_SSH=azureuser@<azure-public-ip>
+CLUSTER_API=10.200.0.1:6443
+```
+
+```bash
+bash scripts/k8s-access.sh
+kubectl get nodes
+```
+
+### 3. GPU node
+
+Create the VM and record its id:
+
+```bash
+jl create --vm --gpu <type-from-jl-gpus> --num-gpus 1 --storage 100 --name k8s-gpu
+```
+
+Write `.k8s-gpu-state` with `MACHINE_ID=<id printed by jl>`. Copy this repo to the VM and write `join.env` in the repo root:
+
+```
+JOIN_COMMAND='kubeadm join 10.200.0.1:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>'
+```
+
+On the GPU VM:
+
+```bash
+sudo env CLUSTER_NODE_IP=10.200.0.2 CLUSTER_IFACE=wg0 \
+  bash k8s/scripts/bootstrap-gpu-node.sh
+```
+
+The node joins as `jarvis-gpu` with the label `gpu.jarvislabs.ai/node=true`.
+
+```bash
+kubectl get nodes
+kubectl get node jarvis-gpu -o jsonpath='{.status.allocatable.nvidia\.com/gpu}{"\n"}'
+```
+
+`1` means the device plugin sees the GPU.
+
+### 4. vLLM and Streamlit
+
+Build the UI image on an amd64 machine (the GPU VM is fine) and load it into containerd on both nodes:
+
+```bash
+sudo podman build -t docker.io/library/llm-deployment-ui:latest -f docker/Dockerfile .
+sudo podman save docker.io/library/llm-deployment-ui:latest | sudo ctr -n k8s.io images import -
+```
+
+From the laptop, with `kubectl` pointed at the cluster:
+
+```bash
+export UI_IMAGE=llm-deployment-ui:latest
+bash scripts/k8s-apply.sh
+```
+
+For a gated model, copy `.env.example` to `.env` and set `HF_TOKEN` before that command. Allow TCP `30066` from your IP, then open `http://<azure-public-ip>:30066`. The first start downloads the model onto the GPU node's disk.
+
+More detail, including the Tailscale helper `scripts/add-gpu-node.sh`, is in [docs/K8S.md](docs/K8S.md). To run vLLM and Streamlit on a single JarvisLabs machine, use [docs/GUIDE.md](docs/GUIDE.md).
 
 ## License
 

@@ -1,5 +1,7 @@
 # Kubernetes on Azure, GPU node on JarvisLabs
 
+From-scratch commands are in the README, under **Set up from scratch**. That path puts both machines on WireGuard: Azure is `10.200.0.1`, the GPU VM is `10.200.0.2`, and kubeadm advertises those addresses.
+
 The control plane is one Azure VM, installed with kubeadm. The GPU worker is a JarvisLabs VM created with `jl create --vm`. vLLM runs only on that worker. Streamlit prefers the Azure node.
 
 JarvisLabs template instances are containers. They cannot join a cluster. The GPU machine has to be a [VM](https://jarvislabs.ai/products/vm): root access, a public IP, and the NVIDIA driver already installed.
