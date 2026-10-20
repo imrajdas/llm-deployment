@@ -1,5 +1,7 @@
 # LLM deployment
 
+<a href="https://hub.xerj.org/contributors/imrajdas"><img src="https://hub.xerj.org/contributors/imrajdas/badge.svg"></a>
+
 Chat with an open model. vLLM runs on a JarvisLabs GPU VM. The Streamlit page runs on an Azure VM.
 
 Model, GPU, and context length are in [`manifest.yaml`](manifest.yaml).
